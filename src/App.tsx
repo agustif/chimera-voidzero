@@ -4,6 +4,7 @@ import {
   closestCenter,
   DndContext,
   PointerSensor,
+  useDraggable,
   useSensor,
   useSensors,
   type DragEndEvent,
@@ -120,6 +121,10 @@ function formatCase(copy: string, heroCase: string) {
   return copy
 }
 
+async function copyText(text: string) {
+  await navigator.clipboard.writeText(text)
+}
+
 function downloadJson(filename: string, payload: unknown) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
@@ -130,6 +135,73 @@ function downloadJson(filename: string, payload: unknown) {
   link.download = filename
   link.click()
   URL.revokeObjectURL(url)
+}
+
+function buildThemeCss(
+  seed: string,
+  sourceName: string | undefined,
+  derived: ReturnType<typeof blendTheme>
+) {
+  const t = derived.tokens
+  return `/* Chimera VoidZero preset
+   seed: ${seed}
+   source: ${sourceName ?? "unknown"}
+*/
+
+:root {
+  --background: ${t.background};
+  --foreground: ${t.text};
+  --card: ${t.surface};
+  --card-foreground: ${t.text};
+  --popover: ${t.surface};
+  --popover-foreground: ${t.text};
+  --primary: ${t.accent};
+  --primary-foreground: ${t.background};
+  --secondary: ${t.surface2};
+  --secondary-foreground: ${t.text};
+  --muted: ${t.surface2};
+  --muted-foreground: ${t.muted};
+  --accent: ${t.accent2};
+  --accent-foreground: ${t.text};
+  --border: ${t.border};
+  --input: ${t.border};
+  --ring: ${t.accent};
+  --radius: ${Math.round(t.radius)}px;
+}
+
+@theme inline {
+  --font-sans: ${fontStack(derived.discrete.fontFamily)};
+}`
+}
+
+function buildComponentSnippet(
+  sourceName: string | undefined,
+  derived: ReturnType<typeof blendTheme>
+) {
+  return `import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+
+export function ${(
+    sourceName ?? "Chimera"
+  ).replace(/[^a-zA-Z0-9]/g, "")}Preset() {
+  return (
+    <div className="grid gap-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Derived theme</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <Input placeholder="Search" />
+          <div className="flex gap-3">
+            <Button>Primary</Button>
+            <Button variant="outline">Secondary</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}`
 }
 
 function makeUploadedSource(file: File, template: (typeof themeLibrary)[number]) {
@@ -229,6 +301,61 @@ function ActiveSourceRow(props: {
   )
 }
 
+function LibrarySourceRow(props: {
+  source: (typeof themeLibrary)[number]
+  isActive: boolean
+  onAssign: () => void
+}) {
+  const draggable = useDraggable({
+    id: `library:${props.source.id}`,
+    data: {
+      kind: "library-source",
+      sourceId: props.source.id,
+    },
+  })
+
+  return (
+    <button
+      ref={draggable.setNodeRef}
+      type="button"
+      className={`grid grid-cols-[24px_40px_minmax(0,1fr)_auto] items-center gap-3 border bg-card px-3 py-2 text-left transition hover:bg-accent/40 ${
+        draggable.isDragging ? "opacity-60 shadow-sm" : ""
+      }`}
+      style={{
+        transform: CSS.Translate.toString(draggable.transform),
+      }}
+      onClick={props.onAssign}
+    >
+      <span
+        className="flex h-8 cursor-grab touch-none items-center justify-center border bg-muted/50 text-[10px] text-muted-foreground"
+        {...draggable.attributes}
+        {...draggable.listeners}
+      >
+        ::
+      </span>
+      <span className="flex h-10 overflow-hidden border bg-muted">
+        <img
+          src={props.source.imageUrl}
+          alt={props.source.name}
+          className="h-full w-full object-cover"
+          loading="lazy"
+        />
+      </span>
+      <span className="min-w-0">
+        <span className="block truncate text-sm font-medium">
+          {props.source.name}
+        </span>
+        <span className="block truncate text-xs text-muted-foreground">
+          {props.source.category} · {props.source.origin} · {props.source.blurb}
+        </span>
+      </span>
+      <span className="text-xs text-muted-foreground">
+        {props.isActive ? "Replace" : "Assign"}
+      </span>
+    </button>
+  )
+}
+
 export default function App() {
   const [sourceLibrary, setSourceLibrary] = useState(themeLibrary)
   const [state, setState] = useState<AppState>(() => {
@@ -240,11 +367,14 @@ export default function App() {
     }
   })
   const [libraryOpen, setLibraryOpen] = useState(false)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
   const [sourceCategory, setSourceCategory] = useState<SourceCategory>("all")
+  const [isFileDropActive, setIsFileDropActive] = useState(false)
   const [leftWidth, setLeftWidth] = useState(392)
-  const [rightWidth, setRightWidth] = useState(420)
   const [centerTopHeight, setCenterTopHeight] = useState(320)
   const fieldRef = useRef<HTMLDivElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const dragDepthRef = useRef(0)
   const dragStateRef = useRef<
     | { kind: "probe" }
     | { kind: "source"; sourceId: string }
@@ -252,7 +382,6 @@ export default function App() {
   >(null)
   const resizeStateRef = useRef<
     | { side: "left"; startX: number; startWidth: number }
-    | { side: "right"; startX: number; startWidth: number }
     | { side: "center"; startY: number; startHeight: number }
     | null
   >(null)
@@ -310,6 +439,35 @@ export default function App() {
         : sourceLibrary.filter((source) => source.category === sourceCategory),
     [sourceCategory, sourceLibrary]
   )
+  const themeCss = useMemo(
+    () => buildThemeCss(state.seed, dominantSource?.name, derived),
+    [derived, dominantSource?.name, state.seed]
+  )
+  const componentSnippet = useMemo(
+    () => buildComponentSnippet(dominantSource?.name, derived),
+    [derived, dominantSource?.name]
+  )
+
+  const ingestFiles = (files: File[]) => {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"))
+    if (imageFiles.length === 0) return
+
+    setSourceLibrary((current) => [
+      ...imageFiles.map((file, index) =>
+        makeUploadedSource(
+          file,
+          current[index % current.length] ?? themeLibrary[index % themeLibrary.length]
+        )
+      ),
+      ...current,
+    ])
+    setLibraryOpen(true)
+    setSourceCategory("all")
+    setState((current) => ({
+      ...current,
+      status: `Imported ${imageFiles.length} custom source${imageFiles.length === 1 ? "" : "s"}.`,
+    }))
+  }
 
   const exportCurrentSystem = () => {
     downloadJson(`chimera-system-${state.seed}.json`, {
@@ -321,7 +479,7 @@ export default function App() {
     })
     setState((current) => ({
       ...current,
-      status: "Exported current system JSON.",
+      status: "Exported JSON.",
     }))
   }
 
@@ -361,15 +519,6 @@ export default function App() {
                 (event.clientX - resizeStateRef.current.startX),
               320,
               520
-            )
-          )
-        } else if (resizeStateRef.current.side === "right") {
-          setRightWidth(
-            clamp(
-              resizeStateRef.current.startWidth -
-                (event.clientX - resizeStateRef.current.startX),
-              360,
-              560
             )
           )
         } else {
@@ -430,6 +579,52 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const hasFiles = (event: DragEvent) =>
+      Array.from(event.dataTransfer?.types ?? []).includes("Files")
+
+    const onDragEnter = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepthRef.current += 1
+      setIsFileDropActive(true)
+    }
+
+    const onDragOver = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+    }
+
+    const onDragLeave = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+      if (dragDepthRef.current === 0) {
+        setIsFileDropActive(false)
+      }
+    }
+
+    const onDrop = (event: DragEvent) => {
+      if (!hasFiles(event)) return
+      event.preventDefault()
+      dragDepthRef.current = 0
+      setIsFileDropActive(false)
+      ingestFiles(Array.from(event.dataTransfer?.files ?? []))
+    }
+
+    window.addEventListener("dragenter", onDragEnter)
+    window.addEventListener("dragover", onDragOver)
+    window.addEventListener("dragleave", onDragLeave)
+    window.addEventListener("drop", onDrop)
+
+    return () => {
+      window.removeEventListener("dragenter", onDragEnter)
+      window.removeEventListener("dragover", onDragOver)
+      window.removeEventListener("dragleave", onDragLeave)
+      window.removeEventListener("drop", onDrop)
+    }
+  }, [])
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
       const isTyping =
@@ -475,7 +670,7 @@ export default function App() {
       <div
         className="grid h-full w-full"
         style={{
-          gridTemplateColumns: `${leftWidth}px 8px minmax(0,1fr) 8px ${rightWidth}px`,
+          gridTemplateColumns: `${leftWidth}px 8px minmax(0,1fr)`,
         }}
       >
         <aside className="flex h-full min-w-0 flex-col border-r bg-sidebar" data-testid="left-pane">
@@ -483,10 +678,30 @@ export default function App() {
               <div>
                 <h1 className="text-sm font-medium">Chimera VoidZero</h1>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Source-first style extraction
+                  References in, theme out
                 </p>
               </div>
-              <Dialog open={libraryOpen} onOpenChange={setLibraryOpen}>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => {
+                    ingestFiles(Array.from(event.target.files ?? []))
+                    event.currentTarget.value = ""
+                  }}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <ImagePlus />
+                  Add images
+                </Button>
+                <Dialog open={libraryOpen} onOpenChange={setLibraryOpen}>
                 <DialogTrigger asChild>
                   <Button variant="outline" size="sm">
                     <FolderOpen />
@@ -497,8 +712,7 @@ export default function App() {
                   <DialogHeader>
                     <DialogTitle>Source corpus</DialogTitle>
                     <DialogDescription>
-                      The corpus is progressive disclosure. You open it only when
-                      you want to replace or expand the active source set.
+                      Import or replace references.
                     </DialogDescription>
                   </DialogHeader>
                   <Tabs
@@ -524,15 +738,7 @@ export default function App() {
                           onChange={(event) => {
                             const files = Array.from(event.target.files ?? [])
                             if (files.length === 0) return
-                            setSourceLibrary((current) => [
-                              ...files.map((file, index) =>
-                                makeUploadedSource(
-                                  file,
-                                  current[index % current.length] ?? themeLibrary[0]
-                                )
-                              ),
-                              ...current,
-                            ])
+                            ingestFiles(files)
                             event.currentTarget.value = ""
                           }}
                         />
@@ -587,7 +793,8 @@ export default function App() {
                   </div>
                   </Tabs>
                 </DialogContent>
-              </Dialog>
+                </Dialog>
+              </div>
             </div>
 
             <div className="border-b px-4 py-3">
@@ -639,7 +846,7 @@ export default function App() {
                   <CardHeader>
                     <CardTitle>Active sources</CardTitle>
                     <CardDescription>
-                      Keep this list short enough to reason about.
+                      Current reference set.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-1" data-testid="active-sources-list">
@@ -695,7 +902,7 @@ export default function App() {
                   <CardHeader>
                     <CardTitle>System controls</CardTitle>
                     <CardDescription>
-                      Tighter controls, smaller surface, same deterministic model.
+                      Blend controls.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-4">
@@ -819,6 +1026,216 @@ export default function App() {
                 <BookmarkPlus />
                 Save system
               </Button>
+              <Dialog open={inspectorOpen} onOpenChange={setInspectorOpen}>
+                <DialogTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    Inspect
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>Inspector</DialogTitle>
+                    <DialogDescription>
+                      Source details and extracted signals.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <Tabs defaultValue="overview" className="flex min-h-0 flex-col">
+                    <TabsList variant="line">
+                      <TabsTrigger value="overview">Overview</TabsTrigger>
+                      <TabsTrigger value="signals">Signals</TabsTrigger>
+                      <TabsTrigger value="saved">Saved</TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="overview" className="min-h-0 flex-1">
+                      <ScrollArea className="h-[60vh]">
+                        <div className="grid gap-4 p-1">
+                          <Card size="sm">
+                            <CardHeader>
+                              <CardTitle>Selected source</CardTitle>
+                              <CardDescription>
+                                Current reference.
+                              </CardDescription>
+                            </CardHeader>
+                            <CardContent className="grid gap-3">
+                              <div className="flex h-28 overflow-hidden border bg-muted">
+                                {selectedSource ? (
+                                  <img
+                                    src={selectedSource.imageUrl}
+                                    alt={selectedSource.name}
+                                    className="h-full w-full object-cover"
+                                    loading="lazy"
+                                  />
+                                ) : null}
+                              </div>
+                              <div>
+                                <div className="text-sm font-medium">
+                                  {selectedSource?.name ?? "Unknown"}
+                                </div>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  {selectedSource?.blurb ??
+                                    "Select a reference."}
+                                </p>
+                                {selectedSource ? (
+                                  <p className="mt-2 text-[11px] text-muted-foreground">
+                                    {selectedSource.category} · {selectedSource.origin}
+                                  </p>
+                                ) : null}
+                              </div>
+                            </CardContent>
+                          </Card>
+
+                          <Card size="sm">
+                            <CardHeader>
+                              <CardTitle>Current state</CardTitle>
+                            </CardHeader>
+                            <CardContent className="grid gap-2 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span>Status</span>
+                                <span className="text-right text-muted-foreground">
+                                  {state.status}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span>Seed</span>
+                                <span className="font-mono">{state.seed}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span>Position</span>
+                                <span className="font-mono">
+                                  {state.point.x.toFixed(2)} × {state.point.y.toFixed(2)}
+                                </span>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        </div>
+                      </ScrollArea>
+                    </TabsContent>
+
+                    <TabsContent value="signals" className="min-h-0 flex-1">
+                      <ScrollArea className="h-[60vh]">
+                        <div className="grid gap-4 p-1">
+                          <Card size="sm">
+                            <CardHeader>
+                              <CardTitle>Extracted signals</CardTitle>
+                              <CardDescription>
+                                Explain the current system instead of forcing the user to infer it from color alone.
+                              </CardDescription>
+                            </CardHeader>
+                            <CardContent className="grid gap-2 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span>Font family</span>
+                                <span>{derived.discrete.fontFamily}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span>Density</span>
+                                <span>{derived.discrete.density}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span>Button treatment</span>
+                                <span>{derived.discrete.buttonStyle}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span>Hero size</span>
+                                <span>{Math.round(derived.tokens.heroSize)} px</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span>Radius</span>
+                                <span>{Math.round(derived.tokens.radius)} px</span>
+                              </div>
+                            </CardContent>
+                          </Card>
+
+                          <Card size="sm">
+                            <CardHeader>
+                              <CardTitle>Top influences</CardTitle>
+                            </CardHeader>
+                            <CardContent className="grid gap-2">
+                              {derived.weights.slice(0, 6).map((item) => (
+                                <div key={item.id} className="grid gap-1">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span>{item.name}</span>
+                                    <span>{Math.round(item.weight * 100)}%</span>
+                                  </div>
+                                  <div className="h-2 bg-border">
+                                    <div
+                                      className="h-full bg-foreground"
+                                      style={{ width: `${item.weight * 100}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              ))}
+                            </CardContent>
+                          </Card>
+                        </div>
+                      </ScrollArea>
+                    </TabsContent>
+
+                    <TabsContent value="saved" className="min-h-0 flex-1">
+                      <ScrollArea className="h-[60vh]">
+                        <div className="grid gap-3 p-1" data-testid="saved-states">
+                          {state.savedStates.length === 0 ? (
+                            <Card size="sm">
+                              <CardContent className="pt-4 text-xs text-muted-foreground">
+                                No saved presets.
+                              </CardContent>
+                            </Card>
+                          ) : (
+                            state.savedStates.map((saved) => (
+                              <Card key={saved.id} size="sm">
+                                <CardContent className="grid gap-3 pt-4">
+                                  <div>
+                                    <div className="text-sm font-medium">
+                                      {saved.label}
+                                    </div>
+                                    <div className="text-xs text-muted-foreground">
+                                      {saved.activeIds.length} sources · {saved.seed}
+                                    </div>
+                                  </div>
+                                  <div className="flex gap-2">
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() =>
+                                        setState((current) => ({
+                                          ...current,
+                                          seed: saved.seed,
+                                          activeIds: saved.activeIds,
+                                          point: saved.point,
+                                          selectedTargetId: saved.activeIds[0] ?? null,
+                                          status: `"${saved.label}" loaded.`,
+                                        }))
+                                      }
+                                    >
+                                      <Crosshair />
+                                      Load
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() =>
+                                        setState((current) =>
+                                          runSync(
+                                            removeSavedBlendState({
+                                              state: current,
+                                              id: saved.id,
+                                            })
+                                          )
+                                        )
+                                      }
+                                    >
+                                      Remove
+                                    </Button>
+                                  </div>
+                                </CardContent>
+                              </Card>
+                            ))
+                          )}
+                        </div>
+                      </ScrollArea>
+                    </TabsContent>
+                  </Tabs>
+                </DialogContent>
+              </Dialog>
             </div>
 
             <div
@@ -833,7 +1250,7 @@ export default function App() {
                     <div>
                       <CardTitle>Navigator</CardTitle>
                       <CardDescription>
-                        Direct-manipulation field. Drag the probe. Drag source chips. Keep the rest of the navigator metadata flat and secondary.
+                        Drag the probe and tags.
                       </CardDescription>
                     </div>
                     <div className="text-right text-xs text-muted-foreground">
@@ -1001,29 +1418,38 @@ export default function App() {
                 }}
               />
               <Card className="min-h-0 overflow-hidden">
-                <CardContent className="h-full min-h-0 p-0">
-                  <ScrollArea className="h-full">
-                    <div
-                      className="m-4 overflow-hidden border bg-card"
-                      data-testid="preview-surface"
-                      style={{
-                        fontFamily: fontStack(derived.discrete.fontFamily),
-                        color: derived.tokens.text,
-                        background: derived.tokens.background,
-                        borderColor: derived.tokens.border,
-                      }}
-                    >
+                <CardContent className="flex h-full min-h-0 flex-col p-0">
+                  <Tabs defaultValue="preview" className="flex h-full min-h-0 flex-col">
+                    <div className="border-b px-4 py-3">
+                      <TabsList variant="line">
+                        <TabsTrigger value="preview">Preview</TabsTrigger>
+                        <TabsTrigger value="theme">Theme</TabsTrigger>
+                        <TabsTrigger value="code">Code</TabsTrigger>
+                      </TabsList>
+                    </div>
+                    <TabsContent value="preview" className="min-h-0 flex-1">
+                      <ScrollArea className="h-full">
+                        <div
+                          className="m-4 overflow-hidden border bg-card"
+                          data-testid="preview-surface"
+                          style={{
+                            fontFamily: fontStack(derived.discrete.fontFamily),
+                            color: derived.tokens.text,
+                            background: derived.tokens.background,
+                            borderColor: derived.tokens.border,
+                          }}
+                        >
                       <div
                         className="grid grid-cols-[1fr_auto] items-center gap-4 border-b px-5 py-4 text-xs"
                         style={{ background: derived.tokens.surface }}
                       >
                         <div className="flex items-center gap-5">
                           <strong className="text-sm font-medium">
-                            Chimera Explorer
+                            Preview
                           </strong>
-                          <span>Field</span>
-                          <span>Extraction</span>
-                          <span>Saved systems</span>
+                          <span>Theme</span>
+                          <span>Code</span>
+                          <span>Saved</span>
                         </div>
                         <Button size="sm" onClick={exportCurrentSystem}>
                           Export
@@ -1048,7 +1474,7 @@ export default function App() {
                             }}
                           >
                             {formatCase(
-                              "System extracted from local image neighborhood",
+                              "Derived theme",
                               derived.discrete.heroCase
                             )}
                           </h2>
@@ -1060,9 +1486,7 @@ export default function App() {
                               lineHeight: derived.tokens.lineHeight,
                             }}
                           >
-                            The specimen is fixed. Only the extracted style
-                            system changes as the active source set and probe
-                            position move.
+                            Fixed preview with current tokens.
                           </p>
                         </div>
                         <div className="grid gap-3">
@@ -1095,7 +1519,7 @@ export default function App() {
                             }}
                           >
                             <div className="text-xs text-muted-foreground">
-                              Composition rule
+                              Policy
                             </div>
                             <div
                               className="mt-2"
@@ -1104,7 +1528,7 @@ export default function App() {
                                 fontWeight: derived.tokens.titleWeight,
                               }}
                             >
-                              Multi-source projection with deterministic replay
+                              Distance-weighted blend
                             </div>
                             <p
                               className="mt-3"
@@ -1113,9 +1537,7 @@ export default function App() {
                                 color: derived.tokens.muted,
                               }}
                             >
-                              Source images are decomposed into structured
-                              signals, then recombined as a local system you can
-                              inspect, save, and export.
+                              Current references drive this token set.
                             </p>
                           </div>
 
@@ -1224,236 +1646,93 @@ export default function App() {
                           </div>
                         </div>
                       </div>
-                    </div>
-                  </ScrollArea>
+                        </div>
+                      </ScrollArea>
+                    </TabsContent>
+                    <TabsContent value="theme" className="min-h-0 flex-1">
+                      <div className="flex h-full min-h-0 flex-col">
+                        <div className="flex items-center justify-between border-b px-4 py-3 text-xs">
+                          <div>
+                            Tailwind v4 + shadcn token block
+                          </div>
+                          <Button
+                            size="sm"
+                            onClick={async () => {
+                              await copyText(themeCss)
+                              setState((current) => ({
+                                ...current,
+                                status: "Copied theme.",
+                              }))
+                            }}
+                          >
+                            Copy theme
+                          </Button>
+                        </div>
+                        <ScrollArea className="h-full">
+                          <pre className="p-4 text-xs leading-6 whitespace-pre-wrap">
+                            <code>{themeCss}</code>
+                          </pre>
+                        </ScrollArea>
+                      </div>
+                    </TabsContent>
+                    <TabsContent value="code" className="min-h-0 flex-1">
+                      <div className="flex h-full min-h-0 flex-col">
+                        <div className="flex items-center justify-between border-b px-4 py-3 text-xs">
+                          <div>
+                            Starter component scaffold
+                          </div>
+                          <Button
+                            size="sm"
+                            onClick={async () => {
+                              await copyText(componentSnippet)
+                              setState((current) => ({
+                                ...current,
+                                status: "Copied component code.",
+                              }))
+                            }}
+                          >
+                            Copy code
+                          </Button>
+                        </div>
+                        <ScrollArea className="h-full">
+                          <pre className="p-4 text-xs leading-6 whitespace-pre-wrap">
+                            <code>{componentSnippet}</code>
+                          </pre>
+                        </ScrollArea>
+                      </div>
+                    </TabsContent>
+                  </Tabs>
                 </CardContent>
               </Card>
             </div>
         </main>
 
-        <div
-          className="cursor-col-resize border-l bg-border/60 transition hover:bg-foreground/15"
-          data-testid="right-resize-handle"
-          onPointerDown={(event) => {
-            resizeStateRef.current = {
-              side: "right",
-              startX: event.clientX,
-              startWidth: rightWidth,
-            }
-            document.body.style.cursor = "col-resize"
-            document.body.style.userSelect = "none"
-          }}
-        />
-
-        <aside className="flex h-full min-w-0 flex-col border-l bg-muted/30" data-testid="right-pane">
-            <div className="border-b px-4 py-3">
-              <div className="text-xs text-muted-foreground">Inspector</div>
-              <div className="text-sm font-medium">
-                {selectedSource?.name ?? "No source selected"}
+      </div>
+      {isFileDropActive ? (
+        <div className="pointer-events-none fixed inset-0 z-50 grid grid-cols-[392px_minmax(0,1fr)] bg-black/30 backdrop-blur-[1px]">
+          <div className="border-r border-white/20 bg-white/85 p-6">
+            <div className="flex h-full flex-col justify-between border-2 border-dashed border-foreground/40 p-6">
+              <div>
+                <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                  Import
+                </div>
+                <h2 className="mt-3 text-2xl font-medium">
+                  Drop images to add references
+                </h2>
+                <p className="mt-3 max-w-xs text-sm text-muted-foreground">
+                  They will appear in the source library immediately.
+                </p>
+              </div>
+              <div className="text-sm text-muted-foreground">
+                Drop anywhere in the window.
               </div>
             </div>
-
-            <Tabs defaultValue="overview" className="flex h-full flex-col">
-              <div className="border-b px-3 py-2">
-                <TabsList variant="line">
-                  <TabsTrigger value="overview">Overview</TabsTrigger>
-                  <TabsTrigger value="signals">Signals</TabsTrigger>
-                  <TabsTrigger value="saved">Saved</TabsTrigger>
-                </TabsList>
-              </div>
-
-              <TabsContent value="overview" className="min-h-0 flex-1">
-                <ScrollArea className="h-full">
-                  <div className="grid gap-4 p-4">
-                    <Card size="sm">
-                      <CardHeader>
-                        <CardTitle>Selected source</CardTitle>
-                        <CardDescription>
-                          The source is the real object. Neighborhoods are only
-                          temporary projections.
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent className="grid gap-3">
-                        <div className="flex h-28 overflow-hidden border bg-muted">
-                          {selectedSource ? (
-                            <img
-                              src={selectedSource.imageUrl}
-                              alt={selectedSource.name}
-                              className="h-full w-full object-cover"
-                              loading="lazy"
-                            />
-                          ) : null}
-                        </div>
-                        <div>
-                          <div className="text-sm font-medium">
-                            {selectedSource?.name ?? "Unknown"}
-                          </div>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {selectedSource?.blurb ??
-                              "Select a source to inspect its extracted profile."}
-                          </p>
-                          {selectedSource ? (
-                            <p className="mt-2 text-[11px] text-muted-foreground">
-                              {selectedSource.category} · {selectedSource.origin}
-                            </p>
-                          ) : null}
-                        </div>
-                      </CardContent>
-                    </Card>
-
-                    <Card size="sm">
-                      <CardHeader>
-                        <CardTitle>Current state</CardTitle>
-                      </CardHeader>
-                      <CardContent className="grid gap-2 text-xs">
-                        <div className="flex items-center justify-between">
-                          <span>Status</span>
-                          <span className="text-right text-muted-foreground">
-                            {state.status}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>Seed</span>
-                          <span className="font-mono">{state.seed}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>Position</span>
-                          <span className="font-mono">
-                            {state.point.x.toFixed(2)} × {state.point.y.toFixed(2)}
-                          </span>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  </div>
-                </ScrollArea>
-              </TabsContent>
-
-              <TabsContent value="signals" className="min-h-0 flex-1">
-                <ScrollArea className="h-full">
-                  <div className="grid gap-4 p-4">
-                    <Card size="sm">
-                      <CardHeader>
-                        <CardTitle>Extracted signals</CardTitle>
-                        <CardDescription>
-                          Explain the current system instead of forcing the user
-                          to infer it from color alone.
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent className="grid gap-2 text-xs">
-                        <div className="flex items-center justify-between">
-                          <span>Font family</span>
-                          <span>{derived.discrete.fontFamily}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>Density</span>
-                          <span>{derived.discrete.density}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>Button treatment</span>
-                          <span>{derived.discrete.buttonStyle}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>Hero size</span>
-                          <span>{Math.round(derived.tokens.heroSize)} px</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>Radius</span>
-                          <span>{Math.round(derived.tokens.radius)} px</span>
-                        </div>
-                      </CardContent>
-                    </Card>
-
-                    <Card size="sm">
-                      <CardHeader>
-                        <CardTitle>Top influences</CardTitle>
-                      </CardHeader>
-                      <CardContent className="grid gap-2">
-                        {derived.weights.slice(0, 6).map((item) => (
-                          <div key={item.id} className="grid gap-1">
-                            <div className="flex items-center justify-between text-xs">
-                              <span>{item.name}</span>
-                              <span>{Math.round(item.weight * 100)}%</span>
-                            </div>
-                            <div className="h-2 bg-border">
-                              <div
-                                className="h-full bg-foreground"
-                                style={{ width: `${item.weight * 100}%` }}
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </CardContent>
-                    </Card>
-                  </div>
-                </ScrollArea>
-              </TabsContent>
-
-              <TabsContent value="saved" className="min-h-0 flex-1">
-                <ScrollArea className="h-full">
-                  <div className="grid gap-3 p-4" data-testid="saved-states">
-                    {state.savedStates.length === 0 ? (
-                      <Card size="sm">
-                        <CardContent className="pt-4 text-xs text-muted-foreground">
-                          No saved systems yet.
-                        </CardContent>
-                      </Card>
-                    ) : (
-                      state.savedStates.map((saved) => (
-                        <Card key={saved.id} size="sm">
-                          <CardContent className="grid gap-3 pt-4">
-                            <div>
-                              <div className="text-sm font-medium">
-                                {saved.label}
-                              </div>
-                              <div className="text-xs text-muted-foreground">
-                                {saved.activeIds.length} sources · {saved.seed}
-                              </div>
-                            </div>
-                            <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() =>
-                                  setState((current) => ({
-                                    ...current,
-                                    seed: saved.seed,
-                                    activeIds: saved.activeIds,
-                                    point: saved.point,
-                                    selectedTargetId: saved.activeIds[0] ?? null,
-                                    status: `"${saved.label}" loaded.`,
-                                  }))
-                                }
-                              >
-                                <Crosshair />
-                                Load
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() =>
-                                  setState((current) =>
-                                    runSync(
-                                      removeSavedBlendState({
-                                        state: current,
-                                        id: saved.id,
-                                      })
-                                    )
-                                  )
-                                }
-                              >
-                                Remove
-                              </Button>
-                            </div>
-                          </CardContent>
-                        </Card>
-                      ))
-                    )}
-                  </div>
-                </ScrollArea>
-              </TabsContent>
-            </Tabs>
-        </aside>
-      </div>
+          </div>
+          <div className="relative">
+            <div className="absolute inset-8 border border-white/20" />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

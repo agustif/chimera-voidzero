@@ -23,7 +23,7 @@ export const buildInitialState = (input: {
   },
   selectedTargetId: input.activeIds[0] ?? null,
   savedStates: input.savedStates,
-  status: 'Select a neighborhood, drag through it, then pin or save anything worth keeping.',
+  status: 'Ready.',
 });
 
 export const loadInitialState = (libraryIds: ReadonlyArray<string>) =>
@@ -63,7 +63,7 @@ export const randomizeActiveSet = (input: {
       ...input.state,
       activeIds,
       selectedTargetId: activeIds[0] ?? null,
-      status: 'Neighborhood regenerated from the current seed.',
+      status: 'Active set randomized.',
     })),
   );
 
@@ -86,7 +86,7 @@ export const reshuffleActiveSet = (input: {
       seed,
       activeIds,
       selectedTargetId: activeIds[0] ?? null,
-      status: 'Seed changed. New neighborhood projected.',
+      status: 'Seed refreshed.',
     };
   });
 
@@ -105,7 +105,7 @@ export const rerollOneTarget = (input: {
       ...input.state,
       activeIds: input.state.activeIds.map((id) => (id === input.targetId ? nextId : id)),
       selectedTargetId: nextId,
-      status: 'Target rerolled inside the current neighborhood.',
+      status: 'Reference rerolled.',
     })),
   );
 
@@ -123,7 +123,7 @@ export const assignTarget = (input: {
         ...input.state,
         activeIds: next.slice(0, input.state.controls.activeCount),
         selectedTargetId: input.themeId,
-        status: 'Theme added to the active neighborhood.',
+        status: 'Reference added.',
       };
     }
 
@@ -134,7 +134,7 @@ export const assignTarget = (input: {
       ...input.state,
       activeIds: unique,
       selectedTargetId: input.themeId,
-      status: 'Selected anchor replaced from the library.',
+      status: 'Reference assigned.',
     };
   });
 
@@ -149,7 +149,7 @@ export const saveBlendState = (input: {
     return {
       ...input.state,
       savedStates,
-      status: `"${input.entry.label}" saved.`,
+      status: 'Saved preset.',
     };
   });
 
@@ -163,7 +163,7 @@ export const removeSavedBlendState = (input: {
     return {
       ...input.state,
       savedStates,
-      status: 'Saved state removed.',
+      status: 'Removed preset.',
     };
   });
 
